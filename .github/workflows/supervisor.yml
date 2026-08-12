@@ -1,0 +1,27 @@
+﻿name: scanner-supervisor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+
+jobs:
+  ensure-scanner-running:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for an active scanner run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ACTIVE=$(gh run list --workflow=scanner.yml --json status \
+            --jq '[.[] | select(.status=="in_progress" or .status=="queued")] | length')
+          echo "active runs: $ACTIVE"
+          if [ "$ACTIVE" -eq 0 ]; then
+            echo "no scanner running -- starting one"
+            gh workflow run scanner.yml
+          else
+            echo "scanner already running -- nothing to do"
+          fi
