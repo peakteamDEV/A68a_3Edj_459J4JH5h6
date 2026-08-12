@@ -15,6 +15,7 @@ jobs:
       - name: Check for an active scanner run
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: peakteamDEV/A68a_3Edj_459J4JH5h6
         run: |
           ACTIVE=$(gh run list --workflow=scanner.yml --json status \
             --jq '[.[] | select(.status=="in_progress" or .status=="queued")] | length')
