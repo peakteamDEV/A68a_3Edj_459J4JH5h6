@@ -1,0 +1,4 @@
+﻿cookie.txt
+item_cache.json
+__pycache__/
+*.pyc
