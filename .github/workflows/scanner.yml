@@ -1,4 +1,4 @@
-﻿name: scan
+﻿name: rolimons-scanner
 
 on:
   workflow_dispatch: {}
@@ -23,6 +23,4 @@ jobs:
       - run: |
           git config user.name "scanner-bot"
           git config user.email "actions@users.noreply.github.com"
-     - run: python -u scan.py
-
-# re-index trigger
+      - run: python -u scan.py
