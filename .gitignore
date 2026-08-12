@@ -2,3 +2,4 @@
 item_cache.json
 __pycache__/
 *.pyc
+poster.py
