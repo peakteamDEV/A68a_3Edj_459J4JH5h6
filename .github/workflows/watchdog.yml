@@ -1,0 +1,23 @@
+﻿name: watchdog
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check archive freshness
+        run: |
+          LAST_COMMIT_TIME=$(git log -1 --format=%ct -- data/ad_archive.json)
+          NOW=$(date +%s)
+          AGE_MIN=$(( (NOW - LAST_COMMIT_TIME) / 60 ))
+          echo "data/ad_archive.json last updated $AGE_MIN minutes ago"
+          if [ "$AGE_MIN" -gt 20 ]; then
+            echo "::error::Scanner appears to be down -- no update in $AGE_MIN minutes. Check your PC and watch_loop.py."
+            exit 1
+          fi
