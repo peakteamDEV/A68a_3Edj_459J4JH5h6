@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: scan
+  group: scanner
   cancel-in-progress: false
 
 jobs:
