@@ -17,7 +17,7 @@ jobs:
           NOW=$(date +%s)
           AGE_MIN=$(( (NOW - LAST_COMMIT_TIME) / 60 ))
           echo "data/ad_archive.json last updated $AGE_MIN minutes ago"
-          if [ "$AGE_MIN" -gt 20 ]; then
-            echo "::error::Scanner appears to be down -- no update in $AGE_MIN minutes. Check your PC and watch_loop.py."
+          if [ "$AGE_MIN" -gt 26 ]; then
+            echo "::error::Scanner appears to be down -- no update in $AGE_MIN minutes. Check the Actions tab for the scanner and supervisor workflows."
             exit 1
           fi
