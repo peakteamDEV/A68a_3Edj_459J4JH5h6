@@ -1,19 +1,46 @@
-﻿import json
+import json
 import os
 import subprocess
 import time
 import traceback
 import requests
 
+UA_STRING = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+FULL_HEADERS = {
+    "User-Agent": UA_STRING,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.rolimons.com/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+}
+DEMAND_MAP = {0: "Terrible", 1: "Low", 2: "Normal", 3: "High", 4: "Amazing", None: "Unassigned"}
+TAG_NAMES = {1: "Any", 2: "Demand", 3: "Rare", 4: "RAP", 5: "Wishlist",
+             6: "Robux", 7: "Upgrade", 8: "Downgrade", 9: "Adds", 10: "Projecteds"}
+TAG_ICONS = {1: "tradetagany", 2: "tradetagdemand", 3: "tradetagrares", 4: "tradetagrap",
+             5: "tradetagwishlist", 6: "tradetagrobux", 7: "tradetagupgrade",
+             8: "tradetagdowngrade", 9: "tradetagadds", 10: "tradetagprojecteds"}
+ARCHIVE_FILE = "data/ad_archive.json"
+ROBUX_TAG = 6
+MIN_VALUE = 5000
+MAX_VALUE = 50000
+POLL_SECONDS = 30
+PUSH_EVERY_N_CYCLES = 10
+MAX_DURATION_SECONDS = 5 * 3600 + 50 * 60
+MIN_CATALOG_BYTES = 400000
+
+os.makedirs("data", exist_ok=True)
+session = requests.Session()
+
+
 def extract_js_object(text, start_marker="var item_details = {"):
     start = text.find(start_marker)
     if start == -1:
         raise ValueError("marker not found")
     start = start + len("var item_details = ")
-    depth = 0
-    in_string = False
-    escape = False
-    i = start
+    depth, in_string, escape, i = 0, False, False, start
     while i < len(text):
         c = text[i]
         if in_string:
@@ -35,39 +62,25 @@ def extract_js_object(text, start_marker="var item_details = {"):
         i += 1
     raise ValueError("truncated")
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-DEMAND_MAP = {0: "Terrible", 1: "Low", 2: "Normal", 3: "High", 4: "Amazing", None: "Unassigned"}
-TAG_NAMES = {1: "Any", 2: "Demand", 3: "Rare", 4: "RAP", 5: "Wishlist",
-             6: "Robux", 7: "Upgrade", 8: "Downgrade", 9: "Adds", 10: "Projecteds"}
-TAG_ICONS = {1: "tradetagany", 2: "tradetagdemand", 3: "tradetagrares", 4: "tradetagrap",
-             5: "tradetagwishlist", 6: "tradetagrobux", 7: "tradetagupgrade",
-             8: "tradetagdowngrade", 9: "tradetagadds", 10: "tradetagprojecteds"}
-ARCHIVE_FILE = "data/ad_archive.json"
-ROBUX_TAG = 6
-MIN_VALUE = 5000
-MAX_VALUE = 50000
-POLL_SECONDS = 30
-PUSH_EVERY_N_CYCLES = 10
-MAX_DURATION_SECONDS = 5 * 3600 + 50 * 60  # 5h50m -- 10min buffer under Actions' 6h hard cap
 
-os.makedirs("data", exist_ok=True)
-
-
-def load_catalog():
-    print("fetching catalog (fresh every job start -- Actions runners have no persistent disk between runs)...")
-    r = requests.get("https://www.rolimons.com/catalog", headers=UA, timeout=20)
-    raw = json.loads(extract_js_object(r.text))
-    catalog = {}
-    for v in raw.values():
-        item_id = v[-1]
-        rap, value = v[8], v[16]
-        conservative = min(rap, value) if value is not None else rap
-        catalog[item_id] = {
-            "name": v[0], "rap": rap, "value": value,
-            "conservative": conservative, "demand": DEMAND_MAP.get(v[17], "Unassigned"),
-        }
-    print(f"catalog loaded: {len(catalog)} items")
-    return catalog
+def load_catalog(attempts=5):
+    for n in range(1, attempts + 1):
+        r = session.get("https://www.rolimons.com/catalog", headers=FULL_HEADERS, timeout=25)
+        if r.status_code == 200 and len(r.text) >= MIN_CATALOG_BYTES and "var item_details = {" in r.text:
+            raw = json.loads(extract_js_object(r.text))
+            catalog = {}
+            for v in raw.values():
+                rap, value = v[8], v[16]
+                catalog[v[-1]] = {
+                    "name": v[0], "rap": rap, "value": value,
+                    "conservative": min(rap, value) if value is not None else rap,
+                    "demand": DEMAND_MAP.get(v[17], "Unassigned"),
+                }
+            print(f"catalog loaded: {len(catalog)} items")
+            return catalog
+        print(f"  catalog attempt {n}: {r.status_code}, {len(r.text):,} chars -- retrying")
+        time.sleep(5 * n)
+    raise RuntimeError("could not fetch a complete catalog page")
 
 
 def price_items(catalog, item_ids):
@@ -87,17 +100,15 @@ def push_to_github(cycle_num):
         subprocess.run(["git", "add", "data/ad_archive.json", "dashboard.html"], check=True, capture_output=True)
         result = subprocess.run(["git", "commit", "-m", f"scan cycle {cycle_num}"], capture_output=True, text=True)
         if "nothing to commit" in result.stdout + result.stderr:
-            print("  (nothing changed, skipping push)")
             return
         subprocess.run(["git", "push"], check=True, capture_output=True, timeout=30)
         print("  pushed to GitHub")
     except Exception as e:
-        print(f"  git push failed (will retry next cycle): {e}")
-
+        print(f"  git push failed: {e}")
 
 def run_once(catalog):
-    ua2 = dict(UA, Referer="https://www.rolimons.com/")
-    r2 = requests.get("https://api.rolimons.com/tradeads/v1/getrecentads", headers=ua2, timeout=20)
+    r2 = session.get("https://api.rolimons.com/tradeads/v1/getrecentads",
+                     headers=FULL_HEADERS, timeout=20)
     ads = r2.json()["trade_ads"]
 
     live = []
@@ -141,11 +152,9 @@ def run_once(catalog):
     for i in range(0, len(need_ids), 100):
         chunk = need_ids[i:i+100]
         try:
-            tr = requests.get(
-                "https://thumbnails.roblox.com/v1/assets",
-                params={"assetIds": ",".join(map(str, chunk)), "size": "150x150", "format": "Png"},
-                headers=UA, timeout=15,
-            )
+            tr = session.get("https://thumbnails.roblox.com/v1/assets",
+                             params={"assetIds": ",".join(map(str, chunk)), "size": "150x150", "format": "Png"},
+                             headers={"User-Agent": UA_STRING}, timeout=15)
             tr.raise_for_status()
             for entry in tr.json().get("data", []):
                 if entry.get("state") == "Completed" and entry.get("imageUrl"):
@@ -190,13 +199,12 @@ def run_once(catalog):
     with open(ARCHIVE_FILE, "w", encoding="utf-8") as f:
         json.dump(archive, f)
 
-    all_ads = sorted(archive.values(), key=lambda a: a["last_seen"], reverse=True)
-    out = {"generated_at": now, "count": len(all_ads),
-           "active_count": sum(1 for a in all_ads if a["active"]), "ads": all_ads}
+    active = sum(1 for a in archive.values() if a["active"])
+    print(f"[{time.strftime('%H:%M:%S')}] archive: {len(archive)} total ({new_count} new, {active} active)")
+    return archive
 
-    html = """<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<title>Trade Ad Watch</title>
+DASH = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Trade Ad Watch</title>
 <style>
 body{background:#0d1017;color:#e6ebf4;font-family:-apple-system,Segoe UI,sans-serif;padding:20px;font-size:13px}
 h1{font-size:22px;margin-bottom:2px;font-family:ui-monospace,Menlo,monospace}
@@ -223,61 +231,40 @@ h1{font-size:22px;margin-bottom:2px;font-family:ui-monospace,Menlo,monospace}
 a.trade{display:block;text-align:center;margin-top:10px;color:#4db8ff;text-decoration:none;
   border:1px solid #36415a;padding:7px;border-radius:4px;font-size:12px}
 a.trade:hover{background:#252d3d}
-</style></head>
-<body>
-<h1>Trade Ad Watch</h1>
-<div class="sub" id="stamp"></div>
-<div id="cards"></div>
+</style></head><body>
+<h1>Trade Ad Watch</h1><div class="sub" id="stamp"></div><div id="cards"></div>
 <script>
 const DATA = __DATA_JSON__;
 document.getElementById('stamp').textContent =
-  new Date(DATA.generated_at * 1000).toLocaleString() + '  --  ' +
-  DATA.count + ' total collected, ' + DATA.active_count + ' still live';
-function itemSlot(i) {
-  return i.thumb ? `<div class="slot"><img src="${i.thumb}" title="${i.name}"></div>` : `<div class="slot"></div>`;
-}
-function tagSlot(t) {
-  return `<div class="slot"><img src="${t.icon}" title="${t.name}"><div class="tagname">${t.name}</div></div>`;
-}
-function pad(slots, n) {
-  const out = slots.slice(0, n);
-  while (out.length < n) out.push('<div class="slot"></div>');
-  return out.join('');
-}
-document.getElementById('cards').innerHTML = DATA.ads.map(a => {
-  const offerSlots = a.items.map(itemSlot);
-  const reqSlots = a.request_items.map(itemSlot).concat(a.request_tags.map(tagSlot));
-  const statusBadge = a.is_new ? '<span class="badge">NEW</span>' : (!a.active ? '<span class="badge gone">GONE</span>' : '');
-  return `<div class="card ${a.is_new ? 'new' : ''} ${!a.active ? 'gone' : ''}">
-    <div class="head"><span class="user">${a.username}${statusBadge}</span></div>
+  new Date(DATA.generated_at*1000).toLocaleString()+'  --  '+DATA.count+' total, '+DATA.active_count+' live';
+function slot(i){return i.thumb?`<div class="slot"><img src="${i.thumb}" title="${i.name}"></div>`:'<div class="slot"></div>'}
+function tag(t){return `<div class="slot"><img src="${t.icon}" title="${t.name}"><div class="tagname">${t.name}</div></div>`}
+function pad(a,n){const o=a.slice(0,n);while(o.length<n)o.push('<div class="slot"></div>');return o.join('')}
+document.getElementById('cards').innerHTML=DATA.ads.map(a=>{
+  const b=a.is_new?'<span class="badge">NEW</span>':(!a.active?'<span class="badge gone">GONE</span>':'');
+  return `<div class="card ${a.is_new?'new':''} ${!a.active?'gone':''}">
+    <div class="head"><span class="user">${a.username}${b}</span></div>
     <div class="cols">
-      <div class="col">
-        <div class="collabel">Offering</div>
-        <div class="grid">${pad(offerSlots, 4)}</div>
-        <div class="stats">
-          <div class="val">Value ${a.total_value.toLocaleString()}</div>
-          <div class="rap">RAP ${a.total_rap.toLocaleString()}</div>
-          ${a.offer_robux > 0 ? `<div class="rbx">+${a.offer_robux.toLocaleString()} Robux</div>` : ''}
-        </div>
-      </div>
-      <div class="col">
-        <div class="collabel">Requesting</div>
-        <div class="grid">${pad(reqSlots, 4)}</div>
-        <div class="stats">${a.request_robux > 0 ? `<div class="rbx">Asking ${a.request_robux.toLocaleString()} Robux</div>` : '<div class="rbx">Robux accepted</div>'}</div>
-      </div>
+      <div class="col"><div class="collabel">Offering</div>
+        <div class="grid">${pad(a.items.map(slot),4)}</div>
+        <div class="stats"><div class="val">Value ${a.total_value.toLocaleString()}</div>
+        <div class="rap">RAP ${a.total_rap.toLocaleString()}</div>
+        ${a.offer_robux>0?`<div class="rbx">+${a.offer_robux.toLocaleString()} Robux</div>`:''}</div></div>
+      <div class="col"><div class="collabel">Requesting</div>
+        <div class="grid">${pad(a.request_items.map(slot).concat(a.request_tags.map(tag)),4)}</div>
+        <div class="stats">${a.request_robux>0?`<div class="rbx">Asking ${a.request_robux.toLocaleString()}</div>`:'<div class="rbx">Robux accepted</div>'}</div></div>
     </div>
-    <a class="trade" href="${a.trade_url}" target="_blank">Open trade window</a>
-  </div>`;
+    <a class="trade" href="${a.trade_url}" target="_blank">Open trade window</a></div>`;
 }).join('');
-</script>
-</body></html>"""
+</script></body></html>"""
 
-    html = html.replace("__DATA_JSON__", json.dumps(out))
+
+def write_dashboard(archive):
+    all_ads = sorted(archive.values(), key=lambda a: a["last_seen"], reverse=True)
+    out = {"generated_at": time.time(), "count": len(all_ads),
+           "active_count": sum(1 for a in all_ads if a["active"]), "ads": all_ads}
     with open("dashboard.html", "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print(f"[{time.strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(58)+chr(37)+chr(83))}] "
-          f"archive: {len(all_ads)} total ({new_count} new, {out[chr(97)+chr(99)+chr(116)+chr(105)+chr(118)+chr(101)+chr(95)+chr(99)+chr(111)+chr(117)+chr(110)+chr(116)]} active)")
+        f.write(DASH.replace("__DATA_JSON__", json.dumps(out)))
 
 
 if __name__ == "__main__":
@@ -287,11 +274,12 @@ if __name__ == "__main__":
     cycle = 0
     while time.time() - start < MAX_DURATION_SECONDS:
         try:
-            run_once(catalog)
+            archive = run_once(catalog)
+            write_dashboard(archive)
             push_to_github(cycle)
         except Exception:
-            print("cycle failed, will retry next interval:")
+            print("cycle failed, retrying next interval:")
             traceback.print_exc()
         cycle += 1
         time.sleep(POLL_SECONDS)
-    print("time budget reached -- exiting cleanly (supervisor will start the next run)")
+    print("time budget reached -- exiting cleanly")
