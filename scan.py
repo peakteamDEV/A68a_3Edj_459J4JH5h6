@@ -30,6 +30,8 @@ POLL_SECONDS = 30
 PUSH_EVERY_N_CYCLES = 10
 MAX_DURATION_SECONDS = 5 * 3600 + 50 * 60
 MIN_CATALOG_BYTES = 400000
+PRUNE_AFTER_HOURS = 24
+DASHBOARD_MAX_ADS = 300
 
 os.makedirs("data", exist_ok=True)
 session = requests.Session()
@@ -177,6 +179,12 @@ def run_once(catalog):
             archive = json.load(f)
 
     now = time.time()
+    cutoff = now - PRUNE_AFTER_HOURS * 3600
+    before = len(archive)
+    archive = {k: v for k, v in archive.items() if v.get("last_seen", 0) >= cutoff}
+    pruned = before - len(archive)
+    if pruned:
+        print(f"  pruned {pruned} ads older than {PRUNE_AFTER_HOURS}h")
     live_ids = {ad["ad_id"] for ad in live}
     new_count = 0
     for ad in live:
@@ -261,8 +269,9 @@ document.getElementById('cards').innerHTML=DATA.ads.map(a=>{
 
 def write_dashboard(archive):
     all_ads = sorted(archive.values(), key=lambda a: a["last_seen"], reverse=True)
+    shown = all_ads[:DASHBOARD_MAX_ADS]
     out = {"generated_at": time.time(), "count": len(all_ads),
-           "active_count": sum(1 for a in all_ads if a["active"]), "ads": all_ads}
+           "active_count": sum(1 for a in all_ads if a["active"]), "ads": shown}
     with open("dashboard.html", "w", encoding="utf-8") as f:
         f.write(DASH.replace("__DATA_JSON__", json.dumps(out)))
 
